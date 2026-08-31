@@ -493,11 +493,17 @@ pub struct RepairStats {
     pub append_failed: usize,
     /// Methods with no usable `code_item` and no record to rebuild one from.
     pub unrecovered: usize,
+    /// Format fields (debug_info_off, tries_size, interfaces_off, etc.) fixed.
+    pub format_fixed: bool,
+    /// Post-fix DexParser::new validation result.
+    pub validation_passed: bool,
+    /// Methods whose bytecode record could not be decoded.
+    pub bytecode_decode_failed: usize,
 }
 
 impl RepairStats {
     fn changed(&self) -> bool {
-        self.header_fixed || self.map_rebuilt || self.inline_applied > 0 || self.appended > 0
+        self.header_fixed || self.map_rebuilt || self.inline_applied > 0 || self.appended > 0 || self.bytecode_decode_failed > 0
     }
 
     fn summary(&self) -> String {
@@ -511,11 +517,22 @@ impl RepairStats {
         if self.append_failed > 0 {
             parts.push(format!("{} unusable records", self.append_failed));
         }
+        if self.bytecode_decode_failed > 0 {
+            parts.push(format!("{} bytecode decode failures", self.bytecode_decode_failed));
+        }
         if self.unrecovered > 0 {
             parts.push(format!("{} methods still without code", self.unrecovered));
         }
         if self.header_fixed {
             parts.push("header bounds fixed".to_string());
+        }
+        if self.format_fixed {
+            parts.push("format fields fixed".to_string());
+        }
+        if self.validation_passed {
+            parts.push("validation OK".to_string());
+        } else if self.format_fixed || self.header_fixed || self.map_rebuilt || self.inline_applied > 0 || self.appended > 0 {
+            parts.push("validation FAILED".to_string());
         }
         if self.map_rebuilt {
             parts.push("map rebuilt".to_string());
@@ -553,50 +570,78 @@ pub fn repair_directory(
     fs::create_dir_all(&repair_dir)
         .with_context(|| format!("failed to create {}", repair_dir.display()))?;
 
-    let mut rewritten = 0usize;
-    for (base, dex_path) in &dex_files {
-        if !crate::shutdown::keep_finalizing() {
-            eprintln!("[!] repair aborted by user; remaining files left as-is");
-            break;
-        }
-        let display_name = dex_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-
-        let json_path = records_dir.join(format!("{base}_code.json"));
-        let records = if json_path.is_file() {
-            match read_records(&json_path) {
-                Ok(records) => Some(records),
-                Err(err) => {
-                    eprintln!("[!] ignoring {}: {err:#}", json_path.display());
-                    None
+    let records_dir_ref: &std::path::Path = records_dir.as_ref();
+    let repair_dir_ref: &std::path::Path = repair_dir.as_ref();
+    let results: Vec<(String, String)> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for (base, dex_path) in &dex_files {
+            if !crate::shutdown::keep_finalizing() {
+                break;
+            }
+            let base = base.clone();
+            let dex_path = dex_path.clone();
+            let handle = s.spawn(move || {
+                if !crate::shutdown::keep_finalizing() {
+                    return (String::new(), String::new());
                 }
-            }
-        } else {
-            None
-        };
+                let display_name = dex_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
 
-        let mut dex_bytes =
-            fs::read(dex_path).with_context(|| format!("failed to read {}", dex_path.display()))?;
-        let stats = match repair_one_dex(&mut dex_bytes, records.as_deref(), options) {
-            Ok(stats) => stats,
-            Err(err) => {
-                println!("[!] {display_name}: {err:#}");
-                continue;
-            }
-        };
-        if !stats.changed() {
-            println!("[=] {display_name}: nothing to repair");
-            continue;
+                let json_path = records_dir_ref.join(format!("{base}_code.json"));
+                let records = if json_path.is_file() {
+                    match read_records(&json_path) {
+                        Ok(records) => Some(records),
+                        Err(err) => {
+                            eprintln!("[!] ignoring {}: {err:#}", json_path.display());
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let mut dex_bytes = match fs::read(&dex_path) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        eprintln!("[!] failed to read {}: {err:#}", dex_path.display());
+                        return (display_name, String::new());
+                    }
+                };
+                let stats = match repair_one_dex(&mut dex_bytes, records.as_deref(), options) {
+                    Ok(stats) => stats,
+                    Err(err) => {
+                        return (display_name, format!("{err:#}"));
+                    }
+                };
+                if !stats.changed() {
+                    return (display_name, String::new());
+                }
+
+                let out_path = repair_dir_ref.join(dex_path.file_name().unwrap_or_default());
+                if let Err(err) = fs::write(&out_path, &dex_bytes) {
+                    eprintln!("[!] failed to write {}: {err:#}", out_path.display());
+                    return (display_name, String::new());
+                }
+                (display_name, stats.summary())
+            });
+            handles.push(handle);
         }
+        handles.into_iter().filter_map(|h| {
+            let (name, summary) = h.join().unwrap();
+            if name.is_empty() { None } else { Some((name, summary)) }
+        }).collect()
+    });
 
-        let out_path = repair_dir.join(dex_path.file_name().unwrap_or_default());
-        fs::write(&out_path, &dex_bytes)
-            .with_context(|| format!("failed to write {}", out_path.display()))?;
-        rewritten += 1;
-        println!("[+] {display_name}: {}", stats.summary());
+    let rewritten = results.len();
+    for (display_name, summary) in &results {
+        if summary.is_empty() {
+            println!("[=] {display_name}: nothing to repair");
+        } else {
+            println!("[+] {display_name}: {summary}");
+        }
     }
 
     println!(
@@ -620,15 +665,24 @@ fn repair_one_dex(
 
     // Bytecode first: both halves of it append to the file, and the map has to
     // come after everything else.
-    if let Some(records) = records.filter(|records| !records.is_empty()) {
-        restore_bytecode(dex_bytes, records, options, &mut stats);
-    }
+    // Always run restore_bytecode, even without records, to zero out bad code_offs.
+    let bytecode_records: &[MethodCodeRecord] = records.unwrap_or(&[]);
+    restore_bytecode(dex_bytes, bytecode_records, options, &mut stats);
+    stats.format_fixed = fix_format_fields(dex_bytes);
     stats.map_rebuilt = rebuild_map(dex_bytes);
     // Header bounds last, once the file has reached its final length.
     stats.header_fixed = fix_header_bounds(dex_bytes);
 
     if stats.changed() {
         recalc_dex_header(dex_bytes);
+        // Validate the fixed DEX
+        match DexParser::new(dex_bytes) {
+            Ok(_) => stats.validation_passed = true,
+            Err(err) => {
+                eprintln!("[!] post-repair validation failed: {err:#}");
+                stats.validation_passed = false;
+            }
+        }
     }
     Ok(stats)
 }
@@ -759,6 +813,8 @@ fn append_missing_code_items(
                     // DEX has no body for it either.
                     if on_disk.is_none() {
                         outcome.unrecovered += 1;
+                        method.code_off = 0;
+                        touched = true;
                     }
                     continue;
                 };
@@ -1194,6 +1250,88 @@ fn fix_header_bounds(dex_bytes: &mut [u8]) -> bool {
     }
     changed
 }
+
+/// Fix general DEX format issues: zero out fields that point past the end of
+/// the file. Packer-stripped data (debug info, annotations, try/catch, etc.)
+/// often leaves stale offsets that crash analysis tools. Setting them to 0 is
+/// always valid — the DEX spec defines 0 as "absent" for every field here.
+fn fix_format_fields(dex_bytes: &mut [u8]) -> bool {
+    let len = dex_bytes.len();
+    let Ok(header) = crate::dex::DexHeader::parse(dex_bytes) else {
+        return false;
+    };
+    let mut changed = false;
+
+    // --- class_def fields ---
+    for i in 0..header.class_defs_size {
+        let Some(off) = (header.class_defs_off as usize).checked_add(i as usize * 32) else {
+            break;
+        };
+        if off + 32 > len {
+            break;
+        }
+        let interfaces_off = le32(&dex_bytes[off + 0x0c..]);
+        let annotations_off = le32(&dex_bytes[off + 0x14..]);
+        let static_values_off = le32(&dex_bytes[off + 0x1c..]);
+        if interfaces_off != 0 && interfaces_off as usize >= len {
+            dex_bytes[off + 0x0c..off + 0x10].copy_from_slice(&0u32.to_le_bytes());
+            changed = true;
+        }
+        if annotations_off != 0 && annotations_off as usize >= len {
+            dex_bytes[off + 0x14..off + 0x18].copy_from_slice(&0u32.to_le_bytes());
+            changed = true;
+        }
+        if static_values_off != 0 && static_values_off as usize >= len {
+            dex_bytes[off + 0x1c..off + 0x20].copy_from_slice(&0u32.to_le_bytes());
+            changed = true;
+        }
+    }
+
+    // --- code_item fields ---
+    for i in 0..header.class_defs_size {
+        let Some(cd_off) = (header.class_defs_off as usize).checked_add(i as usize * 32) else {
+            break;
+        };
+        if cd_off + 32 > len {
+            break;
+        }
+        let class_data_off = le32(&dex_bytes[cd_off + 24..]);
+        if class_data_off == 0 || class_data_off as usize >= len {
+            continue;
+        }
+        let Ok(mut class_data) = parse_class_data(dex_bytes, class_data_off) else {
+            continue;
+        };
+        for method in class_data.methods_mut() {
+            let co = method.code_off as usize;
+            if co == 0 || co + 0x10 > len {
+                continue;
+            }
+            // debug_info_off @ +0x08
+            let dio = le32(&dex_bytes[co + 0x08..]);
+            if dio != 0 && dio as usize >= len {
+                dex_bytes[co + 0x08..co + 0x0c].copy_from_slice(&0u32.to_le_bytes());
+                changed = true;
+            }
+            // tries_size @ +0x06
+            let tries = u16::from_le_bytes([dex_bytes[co + 0x06], dex_bytes[co + 0x07]]);
+            if tries > 0 {
+                let insns_units = le32(&dex_bytes[co + 0x0c..]) as usize;
+                let insns_bytes = insns_units.saturating_mul(2);
+                let try_data_off = co + 0x10 + insns_bytes;
+                let try_data_off = try_data_off.saturating_add(3) & !3;
+                let try_end = try_data_off.saturating_add(tries as usize * 8);
+                if try_end > len {
+                    dex_bytes[co + 0x06..co + 0x08].copy_from_slice(&0u16.to_le_bytes());
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
 
 #[cfg(test)]
 mod tests {

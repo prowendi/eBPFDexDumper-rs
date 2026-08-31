@@ -141,7 +141,6 @@ mod imp {
         sig: String,
     }
 
-    #[derive(Default)]
     struct DumpState {
         output_dir: PathBuf,
         trace: bool,
@@ -157,6 +156,8 @@ mod imp {
         maps_cache: RwLock<HashMap<u32, MapsRegions>>,
         layout_events_seen: RwLock<HashSet<(u32, u64, u32, u32)>>,
         jni_methods: RwLock<Vec<JniMethod>>,
+        /// Native buffer event rate limiter: (count, reset_time)
+        native_buffer_budget: std::sync::Mutex<(u32, std::time::Instant)>,
     }
 
     #[derive(Default, Clone, Debug)]
@@ -232,6 +233,8 @@ mod imp {
         /// be misread as completion.
         intervals: Vec<(u32, u32)>,
         buf: Vec<u8>,
+        /// When the last chunk was received, for timeout-based cleanup.
+        pub last_received: std::time::Instant,
     }
 
     impl DexRecvState {
@@ -289,6 +292,7 @@ mod imp {
                 maps_cache: RwLock::new(HashMap::new()),
                 layout_events_seen: RwLock::new(HashSet::new()),
                 jni_methods: RwLock::new(Vec::new()),
+                native_buffer_budget: std::sync::Mutex::new((200, std::time::Instant::now())),
             }
         }
 
@@ -338,12 +342,14 @@ mod imp {
                         total: hdr.size,
                         intervals: Vec::new(),
                         buf: vec![0; hdr.size as usize],
+                        last_received: std::time::Instant::now(),
                     }
                 });
 
                 let end = hdr.offset.saturating_add(hdr.data_len);
                 if end as usize <= state.buf.len() {
                     state.buf[hdr.offset as usize..end as usize].copy_from_slice(payload);
+                    state.last_received = std::time::Instant::now();
                     state.record(hdr.offset, end);
                 }
 
@@ -551,6 +557,21 @@ mod imp {
                     "native buffer event pid={} addr=0x{:x} size=0x{:x} source={} prot=0x{:x} flags=0x{:x}",
                     evt.pid, evt.addr, evt.size, evt.source, evt.prot, evt.flags
                 );
+            }
+            // Rate limit: max 200 events/second (global, not per-PID)
+            {
+                use std::time::Duration;
+                let mut budget = self.native_buffer_budget.lock().unwrap();
+                if budget.1.elapsed() > Duration::from_secs(1) {
+                    *budget = (200, std::time::Instant::now());
+                }
+                if budget.0 == 0 {
+                    if self.trace {
+                        println!("[native-buffer] rate limit hit, skipping event");
+                    }
+                    return;
+                }
+                budget.0 -= 1;
             }
             if self.native_buffer_scan {
                 match dump_dex_from_native_buffer(evt.pid, evt.addr, evt.size) {
@@ -949,7 +970,7 @@ mod imp {
             state.flush_json()?;
             if config.auto_fix {
                 println!("[+] Auto-fixing DEX files...");
-                if let Err(err) = fix::fix_dex_directory(&config.out) {
+                if let Err(err) = fix::repair_directory(&config.out, None, fix::FixOptions { force_mismatch: false }) {
                     eprintln!("[!] Auto-fix failed: {err:#}");
                 }
             }
@@ -1186,6 +1207,18 @@ mod imp {
                 state.handle_native_buffer_event(data)
             });
             drain_ring(&mut jni_events, |data| state.handle_jni_event(data));
+
+            // Clean up stale pending_dex entries (30s timeout)
+            {
+                use std::time::Duration;
+                let mut pending = state.pending_dex.write().unwrap();
+                let before = pending.len();
+                pending.retain(|_, st| st.last_received.elapsed() < Duration::from_secs(30));
+                let removed = before - pending.len();
+                if removed > 0 && state.trace {
+                    println!("[pending-dex] cleaned up {} stale entries", removed);
+                }
+            }
             thread::sleep(Duration::from_millis(50));
         }
 
@@ -1208,7 +1241,7 @@ mod imp {
         state.flush_json()?;
         if config.auto_fix {
             println!("[+] Auto-fixing DEX files... (press Ctrl+C again to skip)");
-            if let Err(err) = fix::fix_dex_directory(&config.out) {
+            if let Err(err) = fix::repair_directory(&config.out, None, fix::FixOptions { force_mismatch: false }) {
                 eprintln!("[!] Auto-fix failed: {err:#}");
             }
         }
@@ -2148,6 +2181,7 @@ mod imp {
                 total,
                 intervals: Vec::new(),
                 buf: vec![0; total as usize],
+                last_received: std::time::Instant::now(),
             }
         }
 
