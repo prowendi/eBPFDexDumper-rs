@@ -503,7 +503,11 @@ pub struct RepairStats {
 
 impl RepairStats {
     fn changed(&self) -> bool {
-        self.header_fixed || self.map_rebuilt || self.inline_applied > 0 || self.appended > 0 || self.bytecode_decode_failed > 0
+        self.header_fixed
+            || self.map_rebuilt
+            || self.inline_applied > 0
+            || self.appended > 0
+            || self.bytecode_decode_failed > 0
     }
 
     fn summary(&self) -> String {
@@ -518,7 +522,10 @@ impl RepairStats {
             parts.push(format!("{} unusable records", self.append_failed));
         }
         if self.bytecode_decode_failed > 0 {
-            parts.push(format!("{} bytecode decode failures", self.bytecode_decode_failed));
+            parts.push(format!(
+                "{} bytecode decode failures",
+                self.bytecode_decode_failed
+            ));
         }
         if self.unrecovered > 0 {
             parts.push(format!("{} methods still without code", self.unrecovered));
@@ -531,7 +538,12 @@ impl RepairStats {
         }
         if self.validation_passed {
             parts.push("validation OK".to_string());
-        } else if self.format_fixed || self.header_fixed || self.map_rebuilt || self.inline_applied > 0 || self.appended > 0 {
+        } else if self.format_fixed
+            || self.header_fixed
+            || self.map_rebuilt
+            || self.inline_applied > 0
+            || self.appended > 0
+        {
             parts.push("validation FAILED".to_string());
         }
         if self.map_rebuilt {
@@ -629,10 +641,17 @@ pub fn repair_directory(
             });
             handles.push(handle);
         }
-        handles.into_iter().filter_map(|h| {
-            let (name, summary) = h.join().unwrap();
-            if name.is_empty() { None } else { Some((name, summary)) }
-        }).collect()
+        handles
+            .into_iter()
+            .filter_map(|h| {
+                let (name, summary) = h.join().unwrap();
+                if name.is_empty() {
+                    None
+                } else {
+                    Some((name, summary))
+                }
+            })
+            .collect()
     });
 
     let rewritten = results.len();
@@ -1331,7 +1350,6 @@ fn fix_format_fields(dex_bytes: &mut [u8]) -> bool {
 
     changed
 }
-
 
 #[cfg(test)]
 mod tests {

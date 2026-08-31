@@ -970,7 +970,13 @@ mod imp {
             state.flush_json()?;
             if config.auto_fix {
                 println!("[+] Auto-fixing DEX files...");
-                if let Err(err) = fix::repair_directory(&config.out, None, fix::FixOptions { force_mismatch: false }) {
+                if let Err(err) = fix::repair_directory(
+                    &config.out,
+                    None,
+                    fix::FixOptions {
+                        force_mismatch: false,
+                    },
+                ) {
                     eprintln!("[!] Auto-fix failed: {err:#}");
                 }
             }
@@ -1241,7 +1247,13 @@ mod imp {
         state.flush_json()?;
         if config.auto_fix {
             println!("[+] Auto-fixing DEX files... (press Ctrl+C again to skip)");
-            if let Err(err) = fix::repair_directory(&config.out, None, fix::FixOptions { force_mismatch: false }) {
+            if let Err(err) = fix::repair_directory(
+                &config.out,
+                None,
+                fix::FixOptions {
+                    force_mismatch: false,
+                },
+            ) {
                 eprintln!("[!] Auto-fix failed: {err:#}");
             }
         }
