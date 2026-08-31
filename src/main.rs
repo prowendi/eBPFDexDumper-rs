@@ -27,6 +27,9 @@ enum Command {
     DumpSo(DumpSoArgs),
     /// Fix dumped .so files in a directory for static-analysis tools.
     FixSo(FixSoArgs),
+    /// Repair packed DEX files: header bounds, map list, and the code_items a
+    /// packer stripped out.
+    Repair(RepairArgs),
     /// Locate ART interpreter hook targets in a libart.so ELF.
     Offsets(OffsetsArgs),
 }
@@ -227,6 +230,24 @@ struct FixSoArgs {
 }
 
 #[derive(Debug, Parser)]
+struct RepairArgs {
+    /// Directory containing dumped DEX files.
+    #[arg(short, long)]
+    dir: PathBuf,
+
+    /// Directory containing the `*_code.json` records (default: same as --dir).
+    #[arg(long)]
+    code_records: Option<PathBuf>,
+
+    /// Keep going when a captured method body does not fully decode — a
+    /// bytecode stream the eBPF side had to clamp, for instance. The recovered
+    /// register window is then a best guess instead of a measurement, so the
+    /// method is dropped by default rather than rebuilt from a wrong header.
+    #[arg(long)]
+    force_mismatch: bool,
+}
+
+#[derive(Debug, Parser)]
 struct OffsetsArgs {
     /// Path to libart.so.
     #[arg(short, long)]
@@ -325,6 +346,13 @@ fn main() -> Result<()> {
             };
             so_fix::fix_so_directory(&args.dir, &injected, &target)
         }
+        Some(Command::Repair(args)) => fix::repair_directory(
+            &args.dir,
+            args.code_records.as_deref(),
+            fix::FixOptions {
+                force_mismatch: args.force_mismatch,
+            },
+        ),
         Some(Command::Offsets(args)) => {
             let targets = if args.json {
                 art::find_art_offsets_quiet(&args.libart, args.execute_offset, args.nterp_offset)

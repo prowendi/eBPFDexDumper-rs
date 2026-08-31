@@ -1,4 +1,5 @@
 pub mod art;
+pub mod bytecode;
 pub mod dex;
 pub mod dump;
 pub mod fix;
