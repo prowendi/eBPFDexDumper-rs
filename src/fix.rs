@@ -29,6 +29,11 @@ pub struct FixOptions {
     /// known stale. Off by default because padding can corrupt the bytecode
     /// stream / payload alignment.
     pub force_mismatch: bool,
+
+    /// Deduplicate DEX files by SHA256 before repairing.
+    /// When multiple copies of the same DEX exist (loaded at different addresses),
+    /// only the one with the most bytecode records is kept.
+    pub dedup: bool,
 }
 
 /// One non-abstract / non-native method whose bytecode we did not capture.
@@ -556,6 +561,69 @@ impl RepairStats {
     }
 }
 
+/// Deduplicate DEX files by size suffix (from the filename) before repair.
+/// When multiple copies of the same DEX exist (loaded at different addresses),
+/// only the one with the largest file size (most complete read) is kept.
+fn dedup_dex_files(dex_files: &[(String, PathBuf)]) -> Vec<(String, PathBuf)> {
+    if dex_files.is_empty() {
+        return dex_files.to_vec();
+    }
+
+    // Group by size suffix (hex file size in the filename, e.g. "db89d4")
+    // This is more reliable than SHA1 when process_vm_readv produces partial reads.
+    let mut by_size: HashMap<String, Vec<(String, PathBuf)>> = HashMap::new();
+    for (base, path) in dex_files {
+        if let Some(size_suffix) = base.rsplit('_').next() {
+            by_size
+                .entry(size_suffix.to_string())
+                .or_default()
+                .push((base.clone(), path.clone()));
+        }
+    }
+
+    let mut deduped = Vec::with_capacity(by_size.len());
+    let mut removed = 0usize;
+    for (suffix, group) in &by_size {
+        if group.len() == 1 {
+            deduped.push(group[0].clone());
+            continue;
+        }
+
+        // Pick the file with the largest on-disk size (most bytes read)
+        // This handles partial reads where process_vm_readv couldn't read everything.
+        let best = group
+            .iter()
+            .max_by_key(|(_, path)| fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+            .unwrap();
+
+        for (base, path) in group {
+            if base != &best.0 {
+                removed += 1;
+                // Remove the duplicate file to save space
+                let _ = fs::remove_file(path);
+            }
+        }
+        deduped.push(best.clone());
+        let best_size = fs::metadata(&best.1).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "[-] dedup: {} copies of size {} -> kept {} ({} bytes, largest read)",
+            group.len(),
+            suffix,
+            best.0,
+            best_size
+        );
+    }
+
+    if removed > 0 {
+        println!(
+            "[+] Dedup removed {removed} duplicate files, {deduped_len} unique remain",
+            removed = removed,
+            deduped_len = deduped.len()
+        );
+    }
+    deduped
+}
+
 /// Repair every `dex_*.dex` under `dex_dir`, writing results to `dex_dir/repair`.
 ///
 /// [`fix_dex_directory_with`] only overwrites bytecode inside `code_item`s that
@@ -577,6 +645,11 @@ pub fn repair_directory(
     // find_root_dex_files hands back a HashMap; sort so runs are reproducible.
     let mut dex_files: Vec<_> = dex_files.into_iter().collect();
     dex_files.sort();
+
+    // Deduplicate by content before repairing
+    if options.dedup {
+        dex_files = dedup_dex_files(&dex_files);
+    }
 
     let repair_dir = dex_dir.join("repair");
     fs::create_dir_all(&repair_dir)
@@ -628,10 +701,6 @@ pub fn repair_directory(
                         return (display_name, format!("{err:#}"));
                     }
                 };
-                if !stats.changed() {
-                    return (display_name, String::new());
-                }
-
                 let out_path = repair_dir_ref.join(dex_path.file_name().unwrap_or_default());
                 if let Err(err) = fs::write(&out_path, &dex_bytes) {
                     eprintln!("[!] failed to write {}: {err:#}", out_path.display());
@@ -664,7 +733,7 @@ pub fn repair_directory(
     }
 
     println!(
-        "[+] Repair complete: {rewritten}/{} files rewritten -> {}",
+        "[+] Repair complete: {rewritten}/{} files copied -> {}",
         dex_files.len(),
         repair_dir.display()
     );
@@ -743,6 +812,7 @@ fn restore_bytecode(
     // two passes disjoint no matter how the flag is set.
     let exact_fits = FixOptions {
         force_mismatch: false,
+        dedup: false,
     };
     match apply_records_to_dex(dex_bytes, &method2off, records, exact_fits) {
         Ok(applied) => stats.inline_applied = applied.applied,
@@ -1583,6 +1653,7 @@ mod tests {
         }];
         let opts = FixOptions {
             force_mismatch: true,
+            dedup: false,
         };
         let stats = apply_records_to_dex(&mut dex, &map, &records, opts).unwrap();
         assert_eq!(
@@ -1811,6 +1882,7 @@ mod tests {
         let mut dex = dex_with_method(0);
         let options = FixOptions {
             force_mismatch: true,
+            dedup: false,
         };
         let stats = repair_one_dex(&mut dex, Some(&record("0e007300")), options).unwrap();
         assert_eq!(stats.appended, 1);
@@ -1865,6 +1937,7 @@ mod tests {
         let (mut dex, stale_off) = dex_with_intact_code_item(2);
         let options = FixOptions {
             force_mismatch: true,
+            dedup: false,
         };
         let stats = repair_one_dex(&mut dex, Some(&record("120912080e000000")), options).unwrap();
         assert_eq!(stats.inline_applied, 0);

@@ -975,6 +975,7 @@ mod imp {
                     None,
                     fix::FixOptions {
                         force_mismatch: false,
+                        dedup: true,
                     },
                 ) {
                     eprintln!("[!] Auto-fix failed: {err:#}");
@@ -1252,6 +1253,7 @@ mod imp {
                 None,
                 fix::FixOptions {
                     force_mismatch: false,
+                    dedup: true,
                 },
             ) {
                 eprintln!("[!] Auto-fix failed: {err:#}");

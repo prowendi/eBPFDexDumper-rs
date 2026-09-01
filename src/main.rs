@@ -245,6 +245,10 @@ struct RepairArgs {
     /// method is dropped by default rather than rebuilt from a wrong header.
     #[arg(long)]
     force_mismatch: bool,
+
+    /// Disable deduplication of DEX files by content before repairing.
+    #[arg(long)]
+    no_dedup: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -295,6 +299,7 @@ fn main() -> Result<()> {
             &args.dir,
             fix::FixOptions {
                 force_mismatch: args.force_mismatch,
+                dedup: false,
             },
         ),
         Some(Command::DumpSo(args)) => {
@@ -351,6 +356,7 @@ fn main() -> Result<()> {
             args.code_records.as_deref(),
             fix::FixOptions {
                 force_mismatch: args.force_mismatch,
+                dedup: !args.no_dedup,
             },
         ),
         Some(Command::Offsets(args)) => {
