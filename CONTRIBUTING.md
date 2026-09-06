@@ -18,6 +18,17 @@ brew install llvm
 export CLANG=/opt/homebrew/opt/llvm/bin/clang
 ```
 
+Android 构建需给当前 Rust 工具链安装目标标准库，并指向实际安装的 NDK：
+
+```bash
+rustup target add aarch64-linux-android
+export ANDROID_NDK_HOME=/path/to/android-sdk/ndk/<version>
+```
+
+如果同时安装了 Homebrew Rust 和 rustup，确认 `rustc` 使用的是安装了 Android
+目标的工具链；必要时设置 `RUSTC="$(rustup which rustc)"`。不要仅凭 NDK 不在默认
+位置就认定未安装，先检查 Android SDK 下的 `ndk/` 目录。
+
 ## 提交前检查
 
 提交改动前建议执行：
@@ -35,6 +46,11 @@ target/aarch64-linux-android/release/eBPFDexDumper
 ```
 
 如果只改了文档，也至少确认 Markdown 内容准确，不要写超过当前实现能力的功能描述。
+
+主机测试不会执行所有 Android 专用代码。修改采集缓存、BPF 事件或退出流程时，
+还应在 ARM64 Android 上运行测试二进制及自建 APK 的端到端测试；步骤和本轮结果见
+[防御性修复验证](docs/DEFENSIVE_VALIDATION.md)。测试日志应记录 API/ABI、内核、
+探针模式、APK 哈希、手动偏移和退出码，不要只以“文件已生成”判断成功。
 
 ## 打包
 
