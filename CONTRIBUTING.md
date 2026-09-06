@@ -54,6 +54,16 @@ target/aarch64-linux-android/release/eBPFDexDumper
 
 ## 打包
 
+CI 和发布工作流仅使用 `run` 步骤，不依赖外部仓库的 Action，兼容仅允许
+仓库所有者名下 Action 的策略。GitHub 托管的 Ubuntu runner 需提供 Git、rustup、
+Android SDK 的 sdkmanager 和 GitHub CLI；NDK 固定为 `27.2.12479018`（r27c）。
+检出按事件的 `GITHUB_SHA` 固定，PR 测试使用事件对应的合并提交。
+
+推送 `v*` 标签会构建并发布 Android 产物；也可对该标签手动触发 Release 工作流。
+发布步骤通过 `GITHUB_TOKEN` 的 `contents: write` 权限创建 Release 和上传产物，
+普通 CI 仅授予 `contents: read`。工作流变更可用 `actionlint` 检查。
+修复发布工作流后应创建新版本标签，避免移动已发布的旧标签。
+
 本地复现 GitHub Release 产物：
 
 ```bash
